@@ -1,0 +1,89 @@
+
+
+MISMATCHED_VERTICA_TABLE: >
+          SELECT a.table_schema,
+          a.table_name
+          FROM
+          (SELECT * FROM data_compare_status WHERE SOURCE='VERTICA_PRIMARY'
+           AND column_name!='rowcount' and table_name not like 'ox_call%' and table_name not like '%line_item_targeting_daily_fact%'
+          ) a
+          LEFT JOIN
+          ( SELECT * FROM data_compare_status WHERE SOURCE='SNOWFLAKE'
+          AND column_name!='rowcount' and table_name not like 'ox_call%'  and table_name not like '%line_item_targeting_daily_fact%'
+          ) b
+          ON a.table_schema=b.table_schema
+          AND a.table_name=b.table_name
+          AND a.partition_key=b.partition_key
+          AND cast(a.partition_value as int)=cast(b.partition_value as int)
+          AND a.column_name = b.column_name
+          WHERE COALESCE(cast(a.value as int) ,1)/(CASE WHEN COALESCE(cast(b.value as int),1)=0 THEN 1 ELSE COALESCE(cast(b.value as int),1) END) not in (1,0)
+          GROUP BY 1,2
+          ORDER BY 1,2
+
+
+REFRESH_DATA_VERTICA: >
+          SELECT a.table_schema,
+          a.table_name,
+          a.partition_key,
+          a.partition_value
+          FROM
+          (SELECT * FROM data_compare_status WHERE SOURCE='VERTICA_PRIMARY'
+           AND column_name!='rowcount' and table_name not like 'ox_call%' and table_name not like '%line_item_targeting_daily_fact%'  and table_name=?
+          ) a
+          LEFT JOIN
+          ( SELECT * FROM data_compare_status WHERE SOURCE='SNOWFLAKE'
+          AND column_name!='rowcount' and table_name not like 'ox_call%'  and table_name not like '%line_item_targeting_daily_fact%'  and table_name=?
+          ) b
+          ON a.table_schema=b.table_schema
+          AND a.table_name=b.table_name
+          AND a.partition_key=b.partition_key
+          AND cast(a.partition_value as int)=cast(b.partition_value as int)
+          AND a.column_name = b.column_name
+          WHERE COALESCE(cast(a.value as int) ,1)/(CASE WHEN COALESCE(cast(b.value as int),1)=0 THEN 1 ELSE COALESCE(cast(b.value as int),1) END) not in (1,0)
+          GROUP BY 1,2,3,4
+          ORDER BY 1,2,3,4
+
+DELETE_DATA_VERTICA: >
+          SELECT a.table_schema,
+          a.table_name,
+          a.partition_key,
+          a.partition_value
+          FROM
+          (SELECT * FROM data_compare_status WHERE SOURCE='VERTICA_PRIMARY'
+           AND column_name!='rowcount' and table_name not like 'ox_call%' and table_name not like '%line_item_targeting_daily_fact%'  and table_name=?
+          ) a
+          LEFT JOIN
+          ( SELECT * FROM data_compare_status WHERE SOURCE='SNOWFLAKE'
+          AND column_name!='rowcount' and table_name not like 'ox_call%'  and table_name not like '%line_item_targeting_daily_fact%'  and table_name=?
+          ) b
+          ON a.table_schema=b.table_schema
+          AND a.table_name=b.table_name
+          AND a.partition_key=b.partition_key
+          AND cast(a.partition_value as int)=cast(b.partition_value as int)
+          AND a.column_name = b.column_name
+          WHERE COALESCE(cast(a.value as int) ,1)/(CASE WHEN COALESCE(cast(b.value as int),1)=0 THEN 1 ELSE COALESCE(cast(b.value as int),1) END) not in (1,0)
+          GROUP BY 1,2,3,4
+          ORDER BY 1,2,3,4
+
+REFRESH_DATA_IMPALA: >
+          SELECT a.table_schema,
+          a.table_name,
+          a.partition_key,
+          a.partition_value
+          FROM
+          (SELECT * FROM data_compare_status WHERE SOURCE='IMPALA_DSN'
+           AND column_name!='rowcount' and table_name not like 'ox_call%' and table_name not like '%line_item_targeting_daily_fact%'
+          ) a
+          LEFT JOIN
+          ( SELECT * FROM data_compare_status WHERE SOURCE='SNOWFLAKE'
+          AND column_name!='rowcount' and table_name not like 'ox_call%'  and table_name not like '%line_item_targeting_daily_fact%'
+          ) b
+          ON a.table_schema=b.table_schema
+          AND a.table_name=b.table_name
+          AND a.partition_key=b.partition_key
+          AND cast(a.partition_value as int)=cast(b.partition_value as int)
+          AND a.column_name = b.column_name
+          WHERE COALESCE(cast(a.value as int) ,1)/(CASE WHEN COALESCE(cast(b.value as int),1)=0 THEN 1 ELSE COALESCE(cast(b.value as int),1) END) not in (1,0)
+          GROUP BY 1,2,3,4
+          ORDER BY 1,2,3,4
+

@@ -1,0 +1,266 @@
+
+LOG_LEVEL: INFO
+
+GET_SCHEMA:
+ - mstr_datamart
+
+SCHEMA: mstr_datamart
+
+INSERT_DUPS: "insert into dim_duplicates (source_dsn,table_name,duplicate_count)
+                                  VALUES(?, ?, ?)
+                                  ON DUPLICATE KEY UPDATE
+                                   duplicate_count =?"
+DIM_TABLES:
+  - ad_unit_dim
+  - line_item_dim
+  - advertiser_dim
+  - ad_dim
+  - ad_unit_dim
+  - brand_dim
+  - site_dim
+  - partner_dim
+
+
+EXCLUDE_TABLE_NAMES:
+  - 'tmp'
+  - 'temp'
+  - 'test'
+  - 'old'
+  - 'stage'
+  - 'backup'
+  - 'sf_'
+  - 'carrier_dim'
+  - 'staging'
+  - 'bck'
+  - 'content'
+  - 'transition'
+  - 'static'
+  - 'line_item_history_trueup'
+
+
+DIMENSIONS_DUPS:
+  - table_name: 'brand_industry_dim'
+  - column_key: 'brand_id, brand_name'
+
+
+INSERT_FACT_COMPARE_FACT: "INSERT INTO data_compare_status
+            (
+                        table_schema,
+                        table_name,
+                        column_name ,
+                        partition_key,
+                        partition_value,
+                        value,
+                        source
+            )
+            VALUES
+            (
+                        ?,
+                        ? ,
+                        ?,
+                        ?,
+                        ?,
+                        ?,
+                        ?);
+                        "
+
+INSERT_DIM_COMPARE_FACT: "INSERT INTO dim_data_compare_status
+            (           instance_id,
+                        table_schema,
+                        table_name,
+                        column_name ,
+                        partition_key,
+                        partition_value,
+                        value,
+                        source
+            )
+            VALUES
+            (           ?,
+                        ?,
+                        ? ,
+                        ?,
+                        ?,
+                        ?,
+                        ?,
+                        ?);
+                        "
+INSERT_LOAD_STATE: "insert into dw_grid_etl.multi_cluster_load_state
+                  VALUES(?,
+                        ?,
+                        ? ,
+                        ?,
+                        ?)
+                        "
+
+FIND_HOURLY_TABLE: >
+    SELECT
+                   distinct a.source,a.table_name base_table,
+                   b.source,b.table_name rollup_table
+            FROM
+              (SELECT TABLE_NAME,
+                      table_schema,
+                      source,
+                      REPLACE(TABLE_NAME,'_hourly_fact','') feed_name,
+                      replace(partition_key,'hour','') as partition_key,
+                      cast(partition_value/100 as int) as partition_value,
+                      COLUMN_NAME,
+                      SUM(value) AS value
+                from data_compare_status
+               WHERE  TABLE_NAME like '%_hourly_fact'
+                 AND COLUMN_NAME not like 'rowcount'
+               GROUP BY 1,
+                        2,
+                        3,
+                        4,
+                        5,
+                        6,
+                        7) a
+            INNER JOIN
+              (SELECT TABLE_NAME,
+                      table_schema,
+                      source,
+                      REPLACE(REPLACE(REPLACE(REPLACE(TABLE_NAME,'_daily_fact',''),'advt_',''),'_in_utc',''),'_instancetz','') feed_name,
+                      partition_key,
+                      partition_value,
+                      COLUMN_NAME,
+                      SUM(value) AS value
+               FROM data_compare_status
+               WHERE TABLE_NAME like '%daily_fact%'
+               AND COLUMN_NAME not like 'rowcount'
+               GROUP BY 1,
+                        2,
+                        3,
+                        4,
+                        5,
+                        6,
+                        7) b
+            ON a.feed_name=b.feed_name
+            AND a.table_schema=b.table_schema
+            AND a.partition_value=b.partition_value
+            AND a.partition_key=b.partition_key
+            AND a.column_name = b.column_name
+            AND a.source=b.source
+            WHERE ABS(COALESCE(cast(a.value as int) ,1)/(CASE WHEN COALESCE(cast(b.value as int),1)=0 THEN 1 ELSE COALESCE(cast(b.value as int),1) END))>1.01
+
+FIND_DAILY_TABLE: >
+        SELECT
+                   distinct a.source,a.table_name base_table,
+                   b.source,b.table_name rollup_table
+
+            FROM
+              (SELECT TABLE_NAME,
+                      table_schema,
+                      source,
+                      REPLACE(REPLACE(REPLACE(REPLACE(TABLE_NAME,'_daily_fact',''),'advt_',''),'_in_utc',''),'_instancetz','') feed_name,
+                      replace(partition_key,'date','month') as partition_key,
+                      cast(partition_value/100 as int)*100+1 partition_value,
+                      COLUMN_NAME,
+                      SUM(value) AS value
+                from data_compare_status
+               WHERE  TABLE_NAME like '%_daily_fact'
+               GROUP BY 1,
+                        2,
+                        3,
+                        4,
+                        5,
+                        6,
+                        7
+               HAVING MIN(partition_value)=cast(MAX(partition_value)/100 as int)*100+1) a
+            INNER JOIN
+              (SELECT TABLE_NAME,
+                      table_schema,
+                      source,
+                      REPLACE(REPLACE(REPLACE(REPLACE(TABLE_NAME,'_monthly_fact',''),'advt_',''),'_in_utc',''),'_instancetz','') feed_name,
+                      partition_key,
+                      partition_value,
+                      COLUMN_NAME,
+                      SUM(value) AS value
+               FROM data_compare_status
+               WHERE TABLE_NAME like '%_monthly_fact'
+               AND COLUMN_NAME not like 'rowcount'
+               GROUP BY 1,
+                        2,
+                        3,
+                        4,
+                        5,
+                        6,
+                        7) b
+            ON a.feed_name=b.feed_name
+            AND a.table_schema=b.table_schema
+            AND a.partition_key=b.partition_key
+            AND a.partition_value=b.partition_value
+            AND a.column_name = b.column_name
+            AND a.source=b.source
+            WHERE ABS(COALESCE(cast(a.value as int) ,1)/(CASE WHEN COALESCE(cast(b.value as int),1)=0 THEN 1 ELSE COALESCE(cast(b.value as int),1) END))>1.01
+
+DELETE_VERTICA_MISMATCH: >
+        delete from mstr_datamart.data_compare_status where (table_name, partition_value) IN (SELECT   distinct
+                 a.table_name,
+                 a.partition_value
+                  FROM
+                    (SELECT * FROM data_compare_status WHERE SOURCE='VERTICA_PRIMARY' and column_name !='rowcount'
+                     ) a
+                  INNER JOIN
+                    ( SELECT * FROM data_compare_status WHERE SOURCE='SNOWFLAKE' and column_name !='rowcount'
+                      ) b
+                  ON a.table_schema=b.table_schema
+                  AND a.table_name=b.table_name
+                  AND a.partition_key=b.partition_key
+                  AND a.partition_value=b.partition_value
+                  AND a.column_name = b.column_name
+                  WHERE ABS(COALESCE(cast(a.value as int) ,1)/(CASE WHEN COALESCE(cast(b.value as int),1)=0 THEN 1 ELSE COALESCE(cast(b.value as int),1) END)) not in (1,0))
+                  and source='SNOWFLAKE'
+
+DELETE_IMPALA_MISMATCH: >
+        delete from mstr_datamart.data_compare_status where (table_name, partition_value) IN (SELECT   distinct
+                 a.table_name,
+                 a.partition_value
+                  FROM
+                    (SELECT * FROM data_compare_status WHERE SOURCE='IMPALA_DSN' and column_name !='rowcount'
+                     ) a
+                  INNER JOIN
+                    ( SELECT * FROM data_compare_status WHERE SOURCE='SNOWFLAKE' and column_name !='rowcount'
+                      ) b
+                  ON a.table_schema=b.table_schema
+                  AND a.table_name=b.table_name
+                  AND a.partition_key=b.partition_key
+                  AND a.partition_value=b.partition_value
+                  AND a.column_name = b.column_name
+                  WHERE ABS(COALESCE(cast(a.value as int) ,1)/(CASE WHEN COALESCE(cast(b.value as int),1)=0 THEN 1 ELSE COALESCE(cast(b.value as int),1) END)) not in (1,0))
+                  and source='SNOWFLAKE'
+
+
+DELETE_INSTANCE1: "DELETE FROM dim_data_compare_status where instance_id=1 and source='{}'"
+UPDATE_INSTANCE2: "UPDATE dim_data_compare_status set instance_id=1 where instance_id=2 and source='{}'"
+UPDATE_INSTANCE3: "UPDATE dim_data_compare_status set instance_id=2 where instance_id=3 and source='{}'"
+UPDATE_INSTANCE4: "UPDATE dim_data_compare_status set instance_id=3 where instance_id=4 and  source='{}'"
+
+GET_PARTITION: "select partition_expression from tables where table_schema=? and table_name=? and partition_expression like '%sid%'"
+GET_COLUMN: "select column_name from columns where table_schema=? and table_name=?"
+GET_TABLE: "select table_name from tables where table_schema=?"
+GET_PARTITION_KEY: "select distinct partition_value from data_compare_status where source=? and table_name=? and table_schema=? and partition_key=? order by partition_value"
+
+REPOPULATE_TABLE: "delete from mstr_datamart.data_compare_status where source=? and table_name=?"
+
+DELETE_PARTITION_INFO: "delete from mstr_datamart.data_compare_status where table_name=? and partition_value=?"
+
+DELETE_EXISTING_TABLE_DATA: "delete from mstr_datamart.data_compare_status where source=? and  table_name=?"
+
+DELETE_EXISTING_TABLE_PARTITION: "delete from mstr_datamart.data_compare_status where source=? and table_name=? and partition_value=?"
+
+GET_MAX_VALUE : "select MAX(cast(partition_value as int)) from data_compare_status where source=? and table_name=? and table_schema=? and partition_key=? "
+
+GET_MIN_VALUE : "select MIN(cast(partition_value as int)) from data_compare_status where source=? and table_name=? and table_schema=? and partition_key=?"
+
+DELETE_OLDER_PARTITION_INFO: "delete from mstr_datamart.data_compare_status where source=? and table_name=? and table_schema=? and partition_key=? and cast(partition_value as int)<?"
+
+
+GET_TABLE_UPDATED: "select a.variable_name
+        from dw_grid_etl.multi_cluster_load_state a, dw_grid_etl.multi_cluster_load_state
+        b
+        where
+        a.source_dsn = b.source_dsn and a.variable_name = b.variable_name
+        and a.instance_id = 2 and b.instance_id = 1 and a.variable_value != b.variable_value
+        and a.source_dsn=?
+        "
+

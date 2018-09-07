@@ -1,0 +1,649 @@
+ENV: /var/feeds/python/env.yaml
+
+# set this to DEBUG to see much more debugging in log file
+LOG_LEVEL: INFO
+
+MAIL_FROM: "data-intelligence@openx.com"
+MAIL_TO: "atul.dwivedi@openx.com"
+
+CHECK_LIST:
+  - check:
+      check_id: 1
+      source_dsn: SNOWFLAKE
+      check_type: external_check
+      description: TABLE that has issue
+      check_result: "select *
+            from (
+            SELECT distinct a.table_schema, a.table_name, 'MISSING' as  type
+                    FROM
+                      (
+                      SELECT * FROM data_compare_status WHERE SOURCE='VERTICA_PRIMARY' and column_name !='rowcount'
+                       ) a
+                    LEFT JOIN
+                      (
+                      SELECT * FROM data_compare_status WHERE SOURCE='SNOWFLAKE' and column_name !='rowcount'
+
+                      ) b
+                    ON a.table_schema=b.table_schema
+                    AND a.table_name=b.table_name
+                    AND a.partition_key=b.partition_key
+                    AND a.partition_value=b.partition_value
+                    AND a.column_name = b.column_name
+                    WHERE b.partition_value is null
+            UNION
+            SELECT distinct a.table_schema, a.table_name, 'DATA IS NOT MATCHING' as  type
+            FROM
+            (SELECT * FROM data_compare_status WHERE SOURCE='VERTICA_PRIMARY' and column_name !='rowcount'
+            ) a
+            INNER JOIN
+            ( SELECT * FROM data_compare_status WHERE SOURCE='SNOWFLAKE' and column_name !='rowcount'
+            ) b
+            ON a.table_schema=b.table_schema
+            AND a.table_name=b.table_name
+            AND a.partition_key=b.partition_key
+            AND a.partition_value=b.partition_value
+            AND a.column_name = b.column_name
+            WHERE ABS(COALESCE(cast(a.value as int) ,1)/(CASE WHEN COALESCE(cast(b.value as int),1)=0 THEN 1 ELSE COALESCE(cast(b.value as int),1) END))>1.000001)
+            order by 1,2,3"
+      on_change: '1 hour'
+      priority: high
+
+
+  - check:
+      check_id: 3
+      source_dsn: SNOWFLAKE
+      check_type: external_check
+      description: VERTICA VS SNOWFLAKE MISMATCHES
+      check_result: "SELECT distinct a.table_schema,
+                 a.table_name,
+                 a.partition_key,
+                 a.partition_value
+                  FROM
+                    (SELECT * FROM data_compare_status WHERE SOURCE='VERTICA_PRIMARY' and column_name !='rowcount'
+                     ) a
+                  INNER JOIN
+                    ( SELECT * FROM data_compare_status WHERE SOURCE='SNOWFLAKE' and column_name !='rowcount'
+                      ) b
+                  ON a.table_schema=b.table_schema
+                  AND a.table_name=b.table_name
+                  AND a.partition_key=b.partition_key
+                  AND a.partition_value=b.partition_value
+                  AND a.column_name = b.column_name
+                  WHERE ABS(COALESCE(cast(a.value as int) ,1)/(CASE WHEN COALESCE(cast(b.value as int),1)=0 THEN 1 ELSE COALESCE(cast(b.value as int),1) END))>1.01"
+      on_change: '1 hour'
+      priority: high
+
+  - check:
+      check_id: 5
+      source_dsn: SNOWFLAKE
+      check_type: internal_check
+      description: ROLLUP HOURLY VS DAILY  (SNOWFLAKE)
+      check_result: "SELECT
+                   a.source,
+                   a.table_name base_table,
+                   b.table_name rollup_table,
+                   a.partition_key,
+                   a.partition_value,
+                   a.column_name,
+                   (FLOOR(b.value)-FLOOR(a.value)) diff
+            FROM
+              (SELECT TABLE_NAME,
+                      table_schema,
+                      source,
+                      REPLACE(TABLE_NAME,'_hourly_fact','') feed_name,
+                      replace(partition_key,'hour','') as partition_key,
+                      cast(partition_value/100 as int) as partition_value,
+                      COLUMN_NAME,
+                      SUM(value) AS value,
+                      count(distinct partition_value) count_key,
+                      rank() over(partition by replace(partition_key,'hour',''), table_name, source, table_schema order by cast(partition_value/100 as int) asc) rn1,
+                      rank() over(partition by replace(partition_key,'hour',''), table_name, source, table_schema order by cast(partition_value/100 as int) desc) rn2
+                from data_compare_status
+               WHERE  TABLE_NAME like '%_hourly_fact' and TABLE_NAME not like 'demand_%'
+                 AND COLUMN_NAME not like 'rowcount'
+               GROUP BY 1,
+                        2,
+                        3,
+                        4,
+                        5,
+                        6,
+                        7
+               HAVING count(distinct partition_value)=24) a
+            INNER JOIN
+              (SELECT TABLE_NAME,
+                      table_schema,
+                      source,
+                      REPLACE(REPLACE(REPLACE(REPLACE(TABLE_NAME,'_daily_fact',''),'advt_',''),'_in_utc',''),'_instancetz','') feed_name,
+                      partition_key,
+                      partition_value,
+                      COLUMN_NAME,
+                      SUM(value) AS value
+               FROM data_compare_status
+               WHERE TABLE_NAME like '%daily_fact%'
+               AND COLUMN_NAME not like 'rowcount'
+               GROUP BY 1,
+                        2,
+                        3,
+                        4,
+                        5,
+                        6,
+                        7) b
+            ON a.feed_name=b.feed_name
+            AND a.table_schema=b.table_schema
+            AND a.partition_value=b.partition_value
+            AND a.partition_key=b.partition_key
+            AND a.column_name = b.column_name
+            AND a.source=b.source
+            WHERE ABS(COALESCE(cast(a.value as int) ,1)/(CASE WHEN COALESCE(cast(b.value as int),1)=0 THEN 1 ELSE COALESCE(cast(b.value as int),1) END))>1.01 and a.rn1<>1 and a.rn2<>1
+            and a.source='SNOWFLAKE'
+            ORDER BY 1,2,3,4,5,6"
+      on_change: '1 hour'
+      priority: high
+
+  - check:
+      check_id: 6
+      source_dsn: SNOWFLAKE
+      check_type: internal_check
+      description: ROLLUP DAILY VS MONTHLY (SNOWFLAKE)
+      check_result: "SELECT
+                   a.source,
+                   a.table_name base_table,
+                   b.table_name rollup_table,
+                   a.partition_key,
+                   a.partition_value,
+                   a.column_name,
+                   (FLOOR(b.value)-FLOOR(a.value)) diff
+            FROM
+              (SELECT TABLE_NAME,
+                      table_schema,
+                      source,
+                      REPLACE(REPLACE(REPLACE(REPLACE(TABLE_NAME,'_daily_fact',''),'advt_',''),'_in_utc',''),'_instancetz','') feed_name,
+                      replace(partition_key,'date','month') as partition_key,
+                      cast(partition_value/100 as int)*100+1 partition_value,
+                      COLUMN_NAME,
+                      SUM(value) AS value
+                from data_compare_status
+               WHERE  TABLE_NAME like '%_daily_fact' and TABLE_NAME not like 'demand_%'
+               GROUP BY 1,
+                        2,
+                        3,
+                        4,
+                        5,
+                        6,
+                        7
+               HAVING MIN(partition_value)=cast(MAX(partition_value)/100 as int)*100+1) a
+            INNER JOIN
+              (SELECT TABLE_NAME,
+                      table_schema,
+                      source,
+                      REPLACE(REPLACE(REPLACE(REPLACE(TABLE_NAME,'_monthly_fact',''),'advt_',''),'_in_utc',''),'_instancetz','') feed_name,
+                      partition_key,
+                      partition_value,
+                      COLUMN_NAME,
+                      SUM(value) AS value
+               FROM data_compare_status
+               WHERE TABLE_NAME like '%_monthly_fact'
+               AND COLUMN_NAME not like 'rowcount'
+               GROUP BY 1,
+                        2,
+                        3,
+                        4,
+                        5,
+                        6,
+                        7) b
+            ON a.feed_name=b.feed_name
+            AND a.table_schema=b.table_schema
+            AND a.partition_key=b.partition_key
+            AND a.partition_value=b.partition_value
+            AND a.column_name = b.column_name
+            AND a.source=b.source
+            WHERE ABS(COALESCE(cast(a.value as int) ,1)/(CASE WHEN COALESCE(cast(b.value as int),1)=0 THEN 1 ELSE COALESCE(cast(b.value as int),1) END))>1.01
+            and a.source='SNOWFLAKE'
+            ORDER BY 1,2,3,4,5,6;"
+      on_change: '1 hour'
+      priority: high
+
+  - check:
+      check_id: 7
+      source_dsn: SNOWFLAKE
+      check_type: internal_check
+      description: consistency in USD column example tot_revenue vs tot_usd_revenue (SNOWFLAKE)
+      check_result: "SELECT a.source,
+                         a.table_name,
+                         a.partition_key,
+                         a.partition_value,
+                         a.column_name,
+                         a.value
+        FROM data_compare_status a
+        INNER JOIN
+          (SELECT
+                  SOURCE,
+                  table_schema,
+                  TABLE_NAME,
+                  replace(COLUMN_NAME,'_usd','') AS COLUMN_NAME,
+                  partition_key,
+                  partition_value
+           FROM data_compare_status
+           WHERE COLUMN_NAME LIKE '%_usd%'
+             AND value IS NULL ) b ON
+        a.source=b.source
+        AND a.table_schema=b.table_schema
+        AND a.table_name=b.table_name
+        AND a.partition_key=b.partition_key
+        AND a.partition_value=b.partition_value
+        AND a.column_name=b.column_name
+        WHERE a.value IS NOT NULL
+        and a.source='SNOWFLAKE'
+        ORDER BY 1,2,3,4,5;"
+      on_change: '1 hour'
+      priority: medium
+
+  - check:
+      check_id: 8
+      source_dsn: SNOWFLAKE
+      check_type: external_check
+      description: Snowflake and VERTICA dim data mistaches (SNOWFLAKE)
+      check_result: "
+      select e.table_schema, e.table_name,e.partition_key,e.partition_value,e.column_name,
+      e.xv_value ,e.impala_value
+      FROM
+      (
+      select a.table_schema, a.table_name,a.partition_key,a.partition_value,b.column_name,
+      a.value xv_value,b.value impala_value
+      FROM
+      (select * from dim_data_compare_status where source='VERTICA_PRIMARY' and instance_id=3) a
+      LEFT JOIN (select * from dim_data_compare_status where source='SNOWFLAKE' and instance_id=3) b
+      on
+       a.table_name=b.table_name
+       and a.table_schema=b.table_schema
+       and a.partition_key=b.partition_key
+       and a.partition_value=b.partition_value
+       and a.column_name = b.column_name
+      where b.value is null) e
+      INNER JOIN
+      (
+      select a.table_schema, a.table_name,a.partition_key,a.partition_value,b.column_name,
+      a.value xv_value,b.value impala_value
+      FROM (select * from dim_data_compare_status where source='VERTICA_PRIMARY' and instance_id=1) a
+      LEFT JOIN (select * from dim_data_compare_status where source='SNOWFLAKE' and instance_id=1) b
+      on
+       a.table_name=b.table_name
+       and a.table_schema=b.table_schema
+       and a.partition_key=b.partition_key
+       and a.partition_value=b.partition_value
+       and a.column_name = b.column_name
+       and a.instance_id=b.instance_id
+      where b.value is null) f
+      ON e.table_name=f.table_name
+       and e.table_schema=f.table_schema
+       and e.partition_key=f.partition_key
+       and e.partition_value=f.partition_value
+       and e.column_name = f.column_name
+       and COALESCE(e.xv_value,'True')=COALESCE(f.xv_value,'True')
+       and COALESCE(e.impala_value,'True')=COALESCE(f.impala_value,'True')"
+      on_change: '1 hour'
+      priority: high
+
+  - check:
+      check_id: 9
+      source_dsn: SNOWFLAKE
+      check_type: external_check
+      description: Check if Linen Item Targetting has duplicates
+      check_result: "
+       SELECT a.*
+         FROM (select line_item_nk, start_time, end_time from mstr_datamart.line_item_targeting) a
+    LEFT JOIN (select line_item_nk, start_time, end_time from mstr_datamart.line_item_targeting) b
+              USING (line_item_nk)
+        WHERE (b.end_time > a.start_time and b.end_time < a.end_time)
+           OR (b.start_time > a.start_time and b.start_time < a.end_time)
+           OR (b.start_time > a.start_time and b.end_time < a.end_time)
+           OR (b.start_time < a.start_time and b.end_time > a.end_time)
+     ORDER BY a.line_item_nk, a.start_time, a.end_time;"
+      on_change: '1 hour'
+      priority: medium
+
+  - check:
+      check_id: 10
+      source_dsn: SNOWFLAKE
+      check_type: external_check
+      description: Check is total raw spend is same between country and transaction
+      check_result: "SELECT utc_date_sid,
+                            SUM(sdc) sdc_a_spend,
+                            SUM(txn) txn_a_spend
+                       FROM (
+                            SELECT utc_date_sid,
+                                   SUM(tot_raw_spend) sdc,
+                                   0 txn
+                              FROM mstr_datamart.supply_demand_country_hourly_fact f
+                         LEFT JOIN mstr_datamart.line_item_dim ld
+                                ON f.line_item_nk = ld.line_item_nk
+                             WHERE utc_date_sid IN
+                                   (SELECT MAX(utc_date_sid)
+                                      FROM mstr_datamart.ox_transaction_sum_daily_fact)
+                               AND ld.line_item_type = 'lineitem.exchange'
+                          GROUP BY 1
+                         UNION ALL
+                            SELECT utc_date_sid,
+                                   0,
+                                   SUM(tot_a_spend)
+                              FROM mstr_datamart.ox_transaction_sum_daily_fact f
+                         LEFT JOIN mstr_datamart.line_item_dim ld on f.line_item_nk = ld.line_item_nk
+                             WHERE utc_Date_sid IN
+                                   (SELECT MAX(utc_date_sid)
+                                      FROM mstr_datamart.ox_transaction_sum_daily_fact)
+                               AND ld.line_item_type = 'lineitem.exchange'
+                          GROUP BY 1
+                              ) foo
+                   GROUP BY 1
+                     HAVING SUM(sdc) - SUM(txn) != 0
+                   ORDER BY 1;"
+      on_change: '6 hour'
+      priority: medium
+      
+
+  - check:
+      check_id: 11
+      source_dsn: SNOWFLAKE
+      check_type: external_check
+      description: raw_revenue check between supplyDemand_geo and supply_demand_county
+      check_result: "SELECT utc_date_sid,
+                            SUM(tot_raw_revenue_country) as country,
+                            SUM(tot_raw_revenue_geo) as geo
+                       FROM (
+                            SELECT utc_date_sid,
+                                   0 AS tot_raw_revenue_country,
+                                   tot_raw_revenue AS tot_raw_revenue_geo
+                              FROM mstr_datamart.supply_demand_geo_hourly_fact
+                             WHERE utc_date_sid IN
+                                   (SELECT MAX(utc_date_sid)
+                                      FROM mstr_datamart.supply_demand_geo_hourly_fact)
+                               AND tot_view_conversions + tot_click_conversions = 0
+                             UNION ALL
+                            SELECT utc_date_sid,
+                                   tot_raw_revenue AS tot_raw_revenue_country,
+                                   0 AS tot_raw_revenue_geo
+                              FROM mstr_datamart.supply_demand_country_hourly_fact
+                             WHERE utc_Date_sid IN
+                                   (SELECT MAX(utc_date_sid)
+                                      FROM mstr_datamart.supply_demand_country_hourly_fact)
+                              ) foo
+                   GROUP BY 1
+                     HAVING sum(tot_raw_revenue_country) - sum(tot_raw_revenue_geo) != 0;"
+      on_change: '6 hour'
+      priority: medium
+
+
+  - check:
+      check_id: 12
+      source_dsn: SNOWFLAKE
+      check_type: external_check
+      description: raw_revenue check between supplyDemand_geo and supply_hourly_fact
+      check_result: "SELECT utc_date_sid,
+                            SUM(tot_raw_revenue_supply_hour) as supply_hourly_fact,
+                            SUM(tot_raw_revenue_country) as country
+                       FROM (
+                            SELECT utc_date_sid,
+                                   0 AS tot_raw_revenue_supply_hour,
+                                   tot_raw_revenue AS tot_raw_revenue_country
+                              FROM mstr_datamart.supply_demand_country_hourly_fact
+                             WHERE utc_date_sid IN
+                                   (SELECT MAX(utc_date_sid)
+                                      FROM mstr_datamart.supply_demand_country_hourly_fact)
+                         UNION ALL
+                            SELECT utc_date_sid,
+                                   tot_raw_revenue AS tot_raw_revenue_supply_hour,
+                                   0 AS tot_raw_revenue_country
+                              FROM mstr_datamart.supply_hourly_fact
+                             WHERE utc_Date_sid IN
+                                   (SELECT MAX(utc_date_sid)
+                                      FROM mstr_datamart.supply_demand_country_hourly_fact)
+                              ) foo
+                   GROUP BY 1
+                     HAVING sum(tot_raw_revenue_supply_hour) - sum(tot_raw_revenue_country) != 0;"
+      on_change: '6 hour'
+      priority: medium
+      
+
+  - check:
+      check_id: 13
+      source_dsn: SNOWFLAKE
+      check_type: external_check
+      description: tot_raw_spend check between supply_demand_country and demand_hourly_fact
+      check_result: "SELECT utc_date_sid,
+                            SUM(tot_raw_spend_demand_hour) as demand_hourly_fact,
+                            SUM(tot_raw_spend_country) as country
+                       FROM (
+                            SELECT utc_date_sid,
+                                   0 AS tot_raw_spend_demand_hour,
+                                   tot_raw_spend AS tot_raw_spend_country
+                              FROM mstr_datamart.supply_demand_country_hourly_fact
+                             WHERE utc_date_sid IN
+                                   (SELECT MAX(utc_date_sid)
+                                      FROM mstr_datamart.supply_demand_country_hourly_fact)
+                         UNION ALL
+                            SELECT utc_date_sid,
+                                   tot_raw_spend AS tot_raw_spend_demand_hour,
+                                   0 AS tot_raw_spend_country
+                              FROM mstr_datamart.demand_hourly_fact
+                             WHERE utc_Date_sid IN
+                                   (SELECT MAX(utc_date_sid)
+                                      FROM mstr_datamart.supply_demand_country_hourly_fact)
+                              ) foo
+                   GROUP BY 1
+                     HAVING sum(tot_raw_spend_demand_hour) - sum(tot_raw_spend_country) != 0;"
+      on_change: '6 hour'
+      priority: medium
+      
+
+  - check:
+      check_id: 14
+      source_dsn: SNOWFLAKE
+      check_type: external_check
+      description: If more than 1 the video product flag logic will need to be updated
+      check_result: "select * from (select distinct(p_mapped_adunit_type) p_mapped_adunit_type
+                    from mstr_datamart.ox_transaction_sum_daily_fact_instancetz
+                    where floor(instance_date_sid/100) = year(add_months(current_date(),-1))*100 + month(add_months(current_date(),-1))
+                    group by 1
+                    having sum(tot_impressions) > 0
+                    ) result
+                    where result.p_mapped_adunit_type not in ('BANNER','VIDEO')
+                    "
+      on_change: '12 hour'
+      priority: medium
+      
+
+  - check:
+      check_id: 15
+      source_dsn: SNOWFLAKE
+      check_type: external_check
+      description: check the sales_channel_codes in supply_demand_country_daily_fact are limited to OPENXMARKET and PROGRAMMATICDIRECT
+      check_result: "SELECT f.sales_channel_code ,
+            sum(tot_raw_revenue) AS raw_rev
+        FROM mstr_datamart.supply_demand_country_daily_fact f
+        LEFT JOIN mstr_datamart.line_item_dim ld ON f.line_item_nk = ld.line_item_nk
+        WHERE floor(f.instance_date_sid/100) = year(add_months(current_date(),-1))*100 + month(add_months(current_date(),-1))
+          AND ld.line_item_type = 'lineitem.exchange'
+          and f.sales_channel_code NOT IN ('SALESCHANNEL.PROGRAMMATICDIRECT','SALESCHANNEL.OPENXMARKET')
+        GROUP BY 1
+        having sum(tot_requests) > 0"
+      on_change: '12 hour'
+      priority: medium
+      
+  - check:
+      check_id: 16
+      source_dsn: SNOWFLAKE
+      check_type: external_check
+      description: checks that all publisher currencies convert to the 4 currencies we transact in (GBP,JPY,USD,EUR) for each day in rolling 30 days
+      check_result: "select c.* from(
+        select
+                b.*
+                , c.exchange_rate
+                , case when c.exchange_rate is null or 0 then 'error' else '' end as check_p_coin
+        from
+                (select
+                        f.utc_date_sid
+                        , case when f.a_coin not in ('GBP','JPY','USD','EUR') then f.advertiser_account_nk else 0 end as check_a_coin
+                        , f.p_coin
+                        , a.p_coin as p_coin_cross
+                from mstr_datamart.ox_transaction_sum_daily_fact f
+                        cross join (select distinct(p_coin) from mstr_datamart.ox_transaction_sum_daily_fact where p_coin in ('GBP','JPY','USD','EUR') and utc_date_sid >= year(DATEADD('day',-30,current_date()))*10000+month(DATEADD('day',-30,current_date()))*100+day(DATEADD('day',-30,current_date()))) a
+                where is_mkt
+                        and f.utc_date_sid >= year(DATEADD('day',-30,current_date()))*10000+month(DATEADD('day',-30,current_date()))*100+day(DATEADD('day',-30,current_date()))
+                group by 1,2,3,4) b
+                        left join mstr_datamart.currency_exchange_daily_fact c on b.utc_date_sid = c.date_sid and c.base = b.p_coin and b.p_coin_cross = c.currency
+        group by 1,2,3,4,5
+        order by 1,3) c
+where c.check_p_coin <> ''"
+      on_change: '12 hour'
+      priority: medium
+
+
+
+  - check:
+      check_id: 22
+      source_dsn: SNOWFLAKE
+      check_type: rollup missing check
+      description: check if any rollup is not complete.
+      check_result: >
+        SELECT
+                   a.source,
+                   a.table_name base_table,
+                   b.table_name rollup_table,
+                   a.partition_key,
+                   a.partition_value,
+                   a.column_name,
+                   c.partition_key,
+                   c.column_name,
+                   c.partition_value
+            FROM
+              (SELECT TABLE_NAME,
+                      table_schema,
+                      source,
+                      REPLACE(TABLE_NAME,'_hourly_fact','') feed_name,
+                      replace(partition_key,'hour','') as partition_key,
+                      cast(partition_value/100 as int) as partition_value,
+                      COLUMN_NAME,
+                      SUM(value) AS value,
+                      count(distinct partition_value) count_key
+                from data_compare_status
+               WHERE  TABLE_NAME like '%_hourly_fact' and TABLE_NAME not like 'demand_%'
+                 AND COLUMN_NAME not like 'rowcount'
+                 and column_name not like partition_key
+               GROUP BY 1,
+                        2,
+                        3,
+                        4,
+                        5,
+                        6,
+                        7
+               HAVING count(distinct partition_value)=24) a
+            INNER JOIN
+              (SELECT TABLE_NAME,
+                      table_schema,
+                      source,
+                      REPLACE(REPLACE(REPLACE(REPLACE(TABLE_NAME,'_daily_fact',''),'advt_',''),'_in_utc',''),'_instancetz','') feed_name,
+                      partition_key
+               FROM data_compare_status
+               WHERE TABLE_NAME like '%daily_fact%'
+               AND COLUMN_NAME not like 'rowcount'
+               GROUP BY 1,
+                        2,
+                        3,
+                        4,
+                        5
+                ) b
+            ON a.feed_name=b.feed_name
+            AND a.table_schema=b.table_schema
+            AND a.partition_key=b.partition_key
+            AND a.source=b.source
+            LEFT JOIN
+            (SELECT TABLE_NAME,
+                      table_schema,
+                      source,
+                      REPLACE(REPLACE(REPLACE(REPLACE(TABLE_NAME,'_daily_fact',''),'advt_',''),'_in_utc',''),'_instancetz','') feed_name,
+                      partition_key,
+                      partition_value,
+                      COLUMN_NAME,
+                      SUM(value) AS value
+               FROM data_compare_status
+               WHERE TABLE_NAME like '%daily_fact%'
+               AND COLUMN_NAME not like 'rowcount'
+               GROUP BY 1,
+                        2,
+                        3,
+                        4,
+                        5,
+                        6,
+                        7) c
+            ON a.feed_name=c.feed_name
+            AND a.table_schema=c.table_schema
+            AND a.partition_key=c.partition_key
+            AND a.source=c.source
+            where c.partition_value is null
+            and a.source='SNOWFLAKE'
+      on_change: '12 hour'
+      priority: medium
+
+GET_CHECK_LIST: "select
+  a.*
+  from dq_check_list a
+  left join (select check_id,max(run_timestamp)  run_timestamp from dq_check_run_history group by check_id) b
+  on a.check_id=b.check_id
+  where
+  (CASE
+    WHEN a.on_change like '%year%'
+    THEN
+    COALESCE(DATE_ADD(b.run_timestamp, INTERVAL CAST(SUBSTRING_INDEX(a.on_change,' ',1) AS UNSIGNED) YEAR),CURRENT_TIMESTAMP)
+    WHEN a.on_change like '%month%'
+    THEN
+    COALESCE(DATE_ADD(b.run_timestamp, INTERVAL CAST(SUBSTRING_INDEX(a.on_change,' ',1) AS UNSIGNED) MONTH),CURRENT_TIMESTAMP)
+    WHEN a.on_change like '%day%'
+    THEN
+    COALESCE(DATE_ADD(b.run_timestamp, INTERVAL CAST(SUBSTRING_INDEX(a.on_change,' ',1) AS UNSIGNED) DAY),CURRENT_TIMESTAMP)
+    WHEN a.on_change like '%week%'
+    THEN
+    COALESCE(DATE_ADD(b.run_timestamp, INTERVAL CAST(SUBSTRING_INDEX(a.on_change,' ',1) AS UNSIGNED) WEEK),CURRENT_TIMESTAMP)
+    WHEN a.on_change like '%hour%'
+    THEN
+    COALESCE(DATE_ADD(b.run_timestamp, INTERVAL CAST(SUBSTRING_INDEX(a.on_change,' ',1) AS UNSIGNED) HOUR),CURRENT_TIMESTAMP)
+    WHEN b.run_timestamp < (select variable_value from load_state where variable_name=a.on_change)
+    THEN CURRENT_TIMESTAMP
+    WHEN b.run_timestamp is null
+    THEN CURRENT_TIMESTAMP
+    ELSE
+        DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 1 HOUR)
+  END)<=CURRENT_TIMESTAMP();
+  "
+
+INSERT_CHECK_LIST: "INSERT INTO dq_check_list values(?,?,?,?,?,?,?,?)"
+
+CHECK_RUN_HISTORY: "INSERT INTO dq_check_run_history(check_id,bad_data_count) values(?,?)"
+
+TRUNCATE_CHECK_LIST: "truncate table dq_check_list"
+
+INDEX_HEADER: >
+  <html><head>
+  <meta http-equiv="content-type" content="text/html; charset=UTF-8">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="googlebot" content="noindex, nofollow">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <script type="text/javascript" src="//code.jquery.com/jquery-1.9.1.js"></script>
+  <title>Data Quality Dashboard</title>
+  <script type="text/css">
+    .cellContainer {
+      width: 25%;
+      float: left;
+    }
+
+  </script>
+  </head>
+
+  <body>
+  <link href="fancy.min.css" rel="stylesheet">
+  <script src="fancy.min.js"></script>
+  <script src="https://code.fancygrid.com/jquery.sparkline.min.js"></script>
+  <script src="data.js"></script>
+  <table>
+  <td><img src="dqboard.jpg" style="width:150px;height:100px;"></img></td><td><h2>DQ Checks Board</h2></td>
+  </table>
